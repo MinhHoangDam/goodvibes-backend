@@ -6,13 +6,19 @@ using System.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure port for Railway deployment
+// Configure port for deployment - OVERRIDE default behavior
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 Console.WriteLine($"Starting server on port: {port}");
 Console.WriteLine($"PORT environment variable: {Environment.GetEnvironmentVariable("PORT")}");
 
-// Configure the URLs BEFORE building
-builder.WebHost.UseUrls($"http://0.0.0.0:{port}", $"http://[::]:{port}");
+// Force Kestrel to listen on the correct port and interface
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ListenAnyIP(int.Parse(port));
+});
+
+// Also set via UseUrls as backup
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 // Add services
 builder.Services.AddCors(options =>
