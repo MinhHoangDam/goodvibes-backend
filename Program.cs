@@ -6,8 +6,15 @@ using Microsoft.Extensions.Logging;
 var builder = WebApplication.CreateBuilder(args);
 
 // Configure port for Railway deployment
-var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
-builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+Console.WriteLine($"Starting server on port: {port}");
+Console.WriteLine($"PORT environment variable: {Environment.GetEnvironmentVariable("PORT")}");
+
+// Configure the URLs BEFORE building
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.ListenAnyIP(int.Parse(port));
+});
 
 // Add services
 builder.Services.AddCors(options =>
