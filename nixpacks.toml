@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["dotnet-sdk_8"]
+
+[phases.build]
+cmds = ["dotnet restore", "dotnet build --configuration Release"]
+
+[phases.start]
+cmd = "dotnet run --configuration Release --urls http://0.0.0.0:$PORT"
