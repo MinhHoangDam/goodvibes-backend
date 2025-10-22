@@ -259,16 +259,17 @@ app.MapGet("/api/good-vibes/{goodVibeId}", async (HttpClient httpClient, UserCac
             {
                 var replyDict = JsonSerializer.Deserialize<Dictionary<string, object>>(reply.GetRawText())!;
                 
-                if (reply.TryGetProperty("senderUser", out var replySender))
+                // Enrich authorUser (not senderUser for replies)
+                if (reply.TryGetProperty("authorUser", out var replyAuthor))
                 {
-                    if (replySender.TryGetProperty("userId", out var replySenderUserId))
+                    if (replyAuthor.TryGetProperty("userId", out var replyAuthorUserId))
                     {
-                        var avatarUrl = await userCache.GetUserAvatarAsync(replySenderUserId.GetString()!);
+                        var avatarUrl = await userCache.GetUserAvatarAsync(replyAuthorUserId.GetString()!);
                         if (avatarUrl != null)
                         {
-                            var replySenderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(replySender.GetRawText())!;
-                            replySenderDict["avatarUrl"] = avatarUrl;
-                            replyDict["senderUser"] = replySenderDict;
+                            var replyAuthorDict = JsonSerializer.Deserialize<Dictionary<string, object>>(replyAuthor.GetRawText())!;
+                            replyAuthorDict["avatarUrl"] = avatarUrl;
+                            replyDict["authorUser"] = replyAuthorDict;
                         }
                     }
                 }
