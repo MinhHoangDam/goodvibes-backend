@@ -16,7 +16,7 @@ WORKDIR /app
 COPY --from=build /app/out .
 
 # Expose port (Railway will assign the PORT environment variable)
-EXPOSE 8080
+EXPOSE $PORT
 
 # Set the entry point
 ENTRYPOINT ["dotnet", "GoodVibesBackend.dll"]

@@ -2,7 +2,7 @@
 nixPkgs = ["dotnet-sdk_8"]
 
 [phases.build]
-cmds = ["dotnet restore", "dotnet build --configuration Release"]
+cmds = ["dotnet restore", "dotnet publish --configuration Release --output ./publish"]
 
 [phases.start]
-cmd = "dotnet run --configuration Release --urls http://0.0.0.0:$PORT"
+cmd = "dotnet ./publish/GoodVibesBackend.dll --urls http://0.0.0.0:$PORT"
