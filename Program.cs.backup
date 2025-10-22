@@ -1,0 +1,89 @@
+using System.Net.Http.Headers;
+using System.Text.Json;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll",
+        policy =>
+        {
+            policy.AllowAnyOrigin()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        });
+});
+
+builder.Services.AddHttpClient();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Configure middleware
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseCors("AllowAll");
+
+// Your Officevibe API key
+const string OFFICEVIBE_API_KEY = "1dfdd5f52b3c4829adc15e794485eea6";
+const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes";
+
+// Health check endpoint
+app.MapGet("/health", () => 
+{
+    return Results.Ok(new { status = "ok", message = "Server is running" });
+});
+
+// Good Vibes endpoint
+app.MapGet("/api/good-vibes", async (HttpClient httpClient, bool? isPublic) =>
+{
+    try
+    {
+        // Build URL with optional isPublic filter
+        var url = OFFICEVIBE_API_URL;
+        if (isPublic.HasValue)
+        {
+            url += $"?isPublic={isPublic.Value.ToString().ToLower()}";
+        }
+        
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("workleap-subscription-key", OFFICEVIBE_API_KEY);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var response = await httpClient.SendAsync(request);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            return Results.Problem(
+                detail: $"Officevibe API error: {response.StatusCode}. {errorContent}",
+                statusCode: (int)response.StatusCode
+            );
+        }
+
+        var content = await response.Content.ReadAsStringAsync();
+        var jsonDocument = JsonDocument.Parse(content);
+        
+        return Results.Ok(jsonDocument.RootElement);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch Good Vibes: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
+app.Run("http://localhost:5000");
+
+Console.WriteLine("Server is running on http://localhost:5000");
+Console.WriteLine("Good Vibes endpoint: http://localhost:5000/api/good-vibes");
+Console.WriteLine("Health check: http://localhost:5000/health");
+Console.WriteLine("Swagger UI: http://localhost:5000/swagger");
