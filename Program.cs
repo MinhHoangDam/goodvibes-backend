@@ -12,10 +12,7 @@ Console.WriteLine($"Starting server on port: {port}");
 Console.WriteLine($"PORT environment variable: {Environment.GetEnvironmentVariable("PORT")}");
 
 // Configure the URLs BEFORE building
-builder.WebHost.ConfigureKestrel(serverOptions =>
-{
-    serverOptions.ListenAnyIP(int.Parse(port));
-});
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}", $"http://[::]:{port}");
 
 // Add services
 builder.Services.AddCors(options =>
