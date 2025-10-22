@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
+using System.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -53,6 +54,16 @@ const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes
 app.MapGet("/health", () => 
 {
     return Results.Ok(new { status = "ok", message = "Server is running" });
+});
+
+// Debug endpoint to see environment
+app.MapGet("/debug", () => 
+{
+    return Results.Ok(new { 
+        port = Environment.GetEnvironmentVariable("PORT") ?? "not set",
+        environment = app.Environment.EnvironmentName,
+        urls = string.Join(", ", app.Urls)
+    });
 });
 
 // Good Vibes list endpoint
