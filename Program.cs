@@ -70,15 +70,32 @@ app.MapGet("/debug", () =>
 });
 
 // Good Vibes list endpoint
-app.MapGet("/api/good-vibes", async (HttpClient httpClient, UserCacheService userCache, bool? isPublic) =>
+app.MapGet("/api/good-vibes", async (HttpClient httpClient, UserCacheService userCache, bool? isPublic, int? limit, string? continuationToken) =>
 {
     try
     {
-        // Build URL with optional isPublic filter
+        // Build URL with optional query parameters
         var url = OFFICEVIBE_API_URL;
+        var queryParams = new List<string>();
+        
         if (isPublic.HasValue)
         {
-            url += $"?isPublic={isPublic.Value.ToString().ToLower()}";
+            queryParams.Add($"isPublic={isPublic.Value.ToString().ToLower()}");
+        }
+        
+        if (limit.HasValue)
+        {
+            queryParams.Add($"limit={limit.Value}");
+        }
+        
+        if (!string.IsNullOrEmpty(continuationToken))
+        {
+            queryParams.Add($"continuationToken={Uri.EscapeDataString(continuationToken)}");
+        }
+        
+        if (queryParams.Any())
+        {
+            url += "?" + string.Join("&", queryParams);
         }
         
         var request = new HttpRequestMessage(HttpMethod.Get, url);
