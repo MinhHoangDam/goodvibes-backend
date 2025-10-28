@@ -7,7 +7,7 @@ using System.Linq;
 var builder = WebApplication.CreateBuilder(args);
 
 // Configure port for deployment - OVERRIDE default behavior
-var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 Console.WriteLine($"Starting server on port: {port}");
 Console.WriteLine($"PORT environment variable: {Environment.GetEnvironmentVariable("PORT")}");
 
@@ -34,6 +34,8 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddHttpClient();
 builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<GoodVibesCacheService>();
+builder.Services.AddHostedService<GoodVibesCacheService>(provider => provider.GetRequiredService<GoodVibesCacheService>());
 builder.Services.AddScoped<UserCacheService>();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -378,6 +380,392 @@ app.MapGet("/api/users/{userId}", async (HttpClient httpClient, string userId) =
     }
 });
 
+// Statistics endpoints
+app.MapGet("/api/stats/top-senders", async (HttpClient httpClient, UserCacheService userCache, int? limit) =>
+{
+    try
+    {
+        var topLimit = limit ?? 10; // Default to top 10
+
+        // Fetch all public good vibes (no pagination limit for accurate stats)
+        var url = $"{OFFICEVIBE_API_URL}?isPublic=true&limit=1000";
+
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("workleap-subscription-key", OFFICEVIBE_API_KEY);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var response = await httpClient.SendAsync(request);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            return Results.Problem(
+                detail: $"Officevibe API error: {response.StatusCode}. {errorContent}",
+                statusCode: (int)response.StatusCode
+            );
+        }
+
+        var content = await response.Content.ReadAsStringAsync();
+        using var jsonDocument = JsonDocument.Parse(content);
+        var root = jsonDocument.RootElement.Clone();
+
+        // Count good vibes sent by each user
+        var senderCounts = new Dictionary<string, (int count, JsonElement user)>();
+
+        if (root.TryGetProperty("data", out var dataArray) && dataArray.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in dataArray.EnumerateArray())
+            {
+                if (item.TryGetProperty("senderUser", out var senderUser))
+                {
+                    if (senderUser.TryGetProperty("userId", out var userId))
+                    {
+                        var userIdStr = userId.GetString()!;
+                        if (senderCounts.TryGetValue(userIdStr, out var existing))
+                        {
+                            senderCounts[userIdStr] = (existing.count + 1, existing.user);
+                        }
+                        else
+                        {
+                            senderCounts[userIdStr] = (1, senderUser);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        var topSenders = senderCounts
+            .OrderByDescending(kvp => kvp.Value.count)
+            .Take(topLimit)
+            .Select(async kvp =>
+            {
+                var userDict = JsonSerializer.Deserialize<Dictionary<string, object>>(kvp.Value.user.GetRawText())!;
+                var avatarUrl = await userCache.GetUserAvatarAsync(kvp.Key);
+                if (avatarUrl != null)
+                {
+                    userDict["avatarUrl"] = avatarUrl;
+                }
+
+                return new Dictionary<string, object>
+                {
+                    ["user"] = userDict,
+                    ["count"] = kvp.Value.count
+                };
+            })
+            .ToList();
+
+        // Wait for all avatar enrichments
+        var enrichedTopSenders = await Task.WhenAll(topSenders);
+
+        return Results.Ok(new { topSenders = enrichedTopSenders });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch top senders: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
+app.MapGet("/api/stats/top-recipients", async (HttpClient httpClient, UserCacheService userCache, int? limit) =>
+{
+    try
+    {
+        var topLimit = limit ?? 10; // Default to top 10
+
+        // Fetch all public good vibes (no pagination limit for accurate stats)
+        var url = $"{OFFICEVIBE_API_URL}?isPublic=true&limit=1000";
+
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("workleap-subscription-key", OFFICEVIBE_API_KEY);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var response = await httpClient.SendAsync(request);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync();
+            return Results.Problem(
+                detail: $"Officevibe API error: {response.StatusCode}. {errorContent}",
+                statusCode: (int)response.StatusCode
+            );
+        }
+
+        var content = await response.Content.ReadAsStringAsync();
+        using var jsonDocument = JsonDocument.Parse(content);
+        var root = jsonDocument.RootElement.Clone();
+
+        // Count good vibes received by each user
+        var recipientCounts = new Dictionary<string, (int count, JsonElement user)>();
+
+        if (root.TryGetProperty("data", out var dataArray) && dataArray.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in dataArray.EnumerateArray())
+            {
+                if (item.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var recipient in recipients.EnumerateArray())
+                    {
+                        if (recipient.TryGetProperty("userId", out var userId))
+                        {
+                            var userIdStr = userId.GetString()!;
+                            if (recipientCounts.TryGetValue(userIdStr, out var existing))
+                            {
+                                recipientCounts[userIdStr] = (existing.count + 1, existing.user);
+                            }
+                            else
+                            {
+                                recipientCounts[userIdStr] = (1, recipient);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        var topRecipients = recipientCounts
+            .OrderByDescending(kvp => kvp.Value.count)
+            .Take(topLimit)
+            .Select(async kvp =>
+            {
+                var userDict = JsonSerializer.Deserialize<Dictionary<string, object>>(kvp.Value.user.GetRawText())!;
+                var avatarUrl = await userCache.GetUserAvatarAsync(kvp.Key);
+                if (avatarUrl != null)
+                {
+                    userDict["avatarUrl"] = avatarUrl;
+                }
+
+                return new Dictionary<string, object>
+                {
+                    ["user"] = userDict,
+                    ["count"] = kvp.Value.count
+                };
+            })
+            .ToList();
+
+        // Wait for all avatar enrichments
+        var enrichedTopRecipients = await Task.WhenAll(topRecipients);
+
+        return Results.Ok(new { topRecipients = enrichedTopRecipients });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch top recipients: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
+// Get all available months with good vibes data
+app.MapGet("/api/stats/available-months", async (GoodVibesCacheService cacheService) =>
+{
+    try
+    {
+        var allVibes = await cacheService.GetAllVibesAsync();
+
+        // Collect all unique month/year combinations
+        var months = new HashSet<(int year, int month)>();
+
+        foreach (var item in allVibes)
+        {
+            if (item.TryGetProperty("creationDate", out var creationDateProp))
+            {
+                if (DateTime.TryParse(creationDateProp.GetString(), out var creationDate))
+                {
+                    months.Add((creationDate.Year, creationDate.Month));
+                }
+            }
+        }
+
+        // Sort by year and month descending (most recent first)
+        var sortedMonths = months
+            .OrderByDescending(m => m.year)
+            .ThenByDescending(m => m.month)
+            .Select(m => new
+            {
+                year = m.year,
+                month = m.month,
+                label = new DateTime(m.year, m.month, 1).ToString("MMMM yyyy")
+            })
+            .ToList();
+
+        return Results.Ok(new { months = sortedMonths });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch available months: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
+// Monthly leaderboard endpoints
+app.MapGet("/api/stats/monthly/top-senders", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? year, int? month, int? limit) =>
+{
+    try
+    {
+        var topLimit = limit ?? 5;
+        var targetYear = year ?? DateTime.UtcNow.Year;
+        var targetMonth = month ?? DateTime.UtcNow.Month;
+
+        // Get all vibes from cache
+        var allVibes = await cacheService.GetAllVibesAsync();
+
+        // Count good vibes sent by each user in the specified month
+        var senderCounts = new Dictionary<string, (int count, JsonElement user)>();
+
+        foreach (var item in allVibes)
+        {
+            if (item.TryGetProperty("creationDate", out var creationDateProp) &&
+                item.TryGetProperty("senderUser", out var senderUser))
+            {
+                if (DateTime.TryParse(creationDateProp.GetString(), out var creationDate))
+                {
+                    // Check if the vibe is from the target month/year
+                    if (creationDate.Year == targetYear && creationDate.Month == targetMonth)
+                    {
+                        if (senderUser.TryGetProperty("userId", out var userId))
+                        {
+                            var userIdStr = userId.GetString()!;
+                            if (senderCounts.TryGetValue(userIdStr, out var existing))
+                            {
+                                senderCounts[userIdStr] = (existing.count + 1, existing.user);
+                            }
+                            else
+                            {
+                                senderCounts[userIdStr] = (1, senderUser);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        var topSenders = senderCounts
+            .OrderByDescending(kvp => kvp.Value.count)
+            .Take(topLimit)
+            .Select(async kvp =>
+            {
+                var userDict = JsonSerializer.Deserialize<Dictionary<string, object>>(kvp.Value.user.GetRawText())!;
+                var avatarUrl = await userCache.GetUserAvatarAsync(kvp.Key);
+                if (avatarUrl != null)
+                {
+                    userDict["avatarUrl"] = avatarUrl;
+                }
+
+                return new
+                {
+                    user = userDict,
+                    count = kvp.Value.count
+                };
+            })
+            .ToList();
+
+        var enrichedTopSenders = await Task.WhenAll(topSenders);
+
+        return Results.Ok(new {
+            topSenders = enrichedTopSenders,
+            year = targetYear,
+            month = targetMonth
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch monthly top senders: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
+app.MapGet("/api/stats/monthly/top-recipients", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? year, int? month, int? limit) =>
+{
+    try
+    {
+        var topLimit = limit ?? 5;
+        var targetYear = year ?? DateTime.UtcNow.Year;
+        var targetMonth = month ?? DateTime.UtcNow.Month;
+
+        // Get all vibes from cache
+        var allVibes = await cacheService.GetAllVibesAsync();
+
+        // Count good vibes received by each user in the specified month
+        var recipientCounts = new Dictionary<string, (int count, JsonElement user)>();
+
+        foreach (var item in allVibes)
+        {
+            if (item.TryGetProperty("creationDate", out var creationDateProp) &&
+                item.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
+            {
+                if (DateTime.TryParse(creationDateProp.GetString(), out var creationDate))
+                {
+                    // Check if the vibe is from the target month/year
+                    if (creationDate.Year == targetYear && creationDate.Month == targetMonth)
+                    {
+                        foreach (var recipient in recipients.EnumerateArray())
+                        {
+                            if (recipient.TryGetProperty("userId", out var userId))
+                            {
+                                var userIdStr = userId.GetString()!;
+                                if (recipientCounts.TryGetValue(userIdStr, out var existing))
+                                {
+                                    recipientCounts[userIdStr] = (existing.count + 1, existing.user);
+                                }
+                                else
+                                {
+                                    recipientCounts[userIdStr] = (1, recipient);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        var topRecipients = recipientCounts
+            .OrderByDescending(kvp => kvp.Value.count)
+            .Take(topLimit)
+            .Select(async kvp =>
+            {
+                var userDict = JsonSerializer.Deserialize<Dictionary<string, object>>(kvp.Value.user.GetRawText())!;
+                var avatarUrl = await userCache.GetUserAvatarAsync(kvp.Key);
+                if (avatarUrl != null)
+                {
+                    userDict["avatarUrl"] = avatarUrl;
+                }
+
+                return new
+                {
+                    user = userDict,
+                    count = kvp.Value.count
+                };
+            })
+            .ToList();
+
+        var enrichedTopRecipients = await Task.WhenAll(topRecipients);
+
+        return Results.Ok(new {
+            topRecipients = enrichedTopRecipients,
+            year = targetYear,
+            month = targetMonth
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch monthly top recipients: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
 app.Run("http://localhost:5000");
 
 Console.WriteLine("Server is running on http://localhost:5000");
@@ -385,6 +773,11 @@ Console.WriteLine("Good Vibes list endpoint: http://localhost:5000/api/good-vibe
 Console.WriteLine("Single Good Vibe endpoint: http://localhost:5000/api/good-vibes/{id}");
 Console.WriteLine("Collections endpoint: http://localhost:5000/api/good-vibes/collections");
 Console.WriteLine("User info endpoint: http://localhost:5000/api/users/{userId}");
+Console.WriteLine("Top senders: http://localhost:5000/api/stats/top-senders");
+Console.WriteLine("Top recipients: http://localhost:5000/api/stats/top-recipients");
+Console.WriteLine("Available months: http://localhost:5000/api/stats/available-months");
+Console.WriteLine("Monthly top senders: http://localhost:5000/api/stats/monthly/top-senders");
+Console.WriteLine("Monthly top recipients: http://localhost:5000/api/stats/monthly/top-recipients");
 Console.WriteLine("Health check: http://localhost:5000/health");
 Console.WriteLine("Swagger UI: http://localhost:5000/swagger");
 
@@ -490,5 +883,122 @@ public class UserCacheService
         }
 
         return null; // Return null if all attempts failed
+    }
+}
+
+// Background service to cache all good vibes
+public class GoodVibesCacheService : BackgroundService
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<GoodVibesCacheService> _logger;
+    private List<JsonElement> _cachedVibes = new();
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private const string OFFICEVIBE_API_KEY = "1dfdd5f52b3c4829adc15e794485eea6";
+    private const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes";
+
+    public GoodVibesCacheService(IHttpClientFactory httpClientFactory, ILogger<GoodVibesCacheService> logger)
+    {
+        _httpClientFactory = httpClientFactory;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("GoodVibesCacheService is starting - fetching all good vibes...");
+
+        // Initial load
+        await RefreshCacheAsync();
+
+        // Refresh every 5 minutes
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+            await RefreshCacheAsync();
+        }
+    }
+
+    private async Task RefreshCacheAsync()
+    {
+        try
+        {
+            var httpClient = _httpClientFactory.CreateClient();
+            var allVibes = new List<JsonElement>();
+            string? continuationToken = null;
+            int pageCount = 0;
+
+            do
+            {
+                var url = $"{OFFICEVIBE_API_URL}?isPublic=true&limit=100";
+                if (!string.IsNullOrEmpty(continuationToken))
+                {
+                    url += $"&continuationToken={Uri.EscapeDataString(continuationToken)}";
+                }
+
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Add("workleap-subscription-key", OFFICEVIBE_API_KEY);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+                var response = await httpClient.SendAsync(request);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogError($"Failed to fetch good vibes: {response.StatusCode}");
+                    break;
+                }
+
+                var content = await response.Content.ReadAsStringAsync();
+                using var jsonDocument = JsonDocument.Parse(content);
+                var root = jsonDocument.RootElement.Clone();
+
+                if (root.TryGetProperty("data", out var dataArray) && dataArray.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in dataArray.EnumerateArray())
+                    {
+                        allVibes.Add(item.Clone());
+                    }
+                }
+
+                pageCount++;
+
+                // Check for continuation token
+                continuationToken = null;
+                if (root.TryGetProperty("metadata", out var metadata))
+                {
+                    if (metadata.TryGetProperty("continuationToken", out var token))
+                    {
+                        continuationToken = token.GetString();
+                    }
+                }
+
+            } while (!string.IsNullOrEmpty(continuationToken));
+
+            await _semaphore.WaitAsync();
+            try
+            {
+                _cachedVibes = allVibes;
+                _logger.LogInformation($"Cached {allVibes.Count} good vibes from {pageCount} pages");
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error refreshing good vibes cache");
+        }
+    }
+
+    public async Task<List<JsonElement>> GetAllVibesAsync()
+    {
+        await _semaphore.WaitAsync();
+        try
+        {
+            return new List<JsonElement>(_cachedVibes);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
     }
 }
