@@ -3,8 +3,40 @@ using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Linq;
+using Azure.Identity;
+using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using Azure.Security.KeyVault.Secrets;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Azure Key Vault if in production
+var keyVaultUrl = builder.Configuration["KeyVaultUrl"];
+if (!string.IsNullOrEmpty(keyVaultUrl))
+{
+    // Get the User-Assigned Managed Identity Client ID from configuration
+    var managedIdentityClientId = builder.Configuration["ManagedIdentityClientId"];
+
+    Console.WriteLine($"Configuring Key Vault: {keyVaultUrl}");
+    if (!string.IsNullOrEmpty(managedIdentityClientId))
+    {
+        Console.WriteLine($"Using User-Assigned Managed Identity: {managedIdentityClientId}");
+    }
+
+    // Create credential for user-assigned managed identity
+    Azure.Core.TokenCredential credential;
+    if (!string.IsNullOrEmpty(managedIdentityClientId))
+    {
+        credential = new ManagedIdentityCredential(managedIdentityClientId);
+    }
+    else
+    {
+        // Fallback for local development
+        credential = new DefaultAzureCredential();
+    }
+
+    var secretClient = new SecretClient(new Uri(keyVaultUrl), credential);
+    builder.Configuration.AddAzureKeyVault(secretClient, new KeyVaultSecretManager());
+}
 
 // Configure port for deployment - OVERRIDE default behavior
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
@@ -51,9 +83,11 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("AllowAll");
 
-// Your Officevibe API key
-const string OFFICEVIBE_API_KEY = "1dfdd5f52b3c4829adc15e794485eea6";
+// Get API key from configuration (Key Vault in production, appsettings in development)
+var OFFICEVIBE_API_KEY = app.Configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6"; // Fallback for local dev
 const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes";
+
+Console.WriteLine($"Using Officevibe API Key: {OFFICEVIBE_API_KEY[..Math.Min(8, OFFICEVIBE_API_KEY.Length)]}...");
 
 // Health check endpoint
 app.MapGet("/health", () => 
@@ -604,6 +638,90 @@ app.MapGet("/api/stats/available-months", async (GoodVibesCacheService cacheServ
     }
 });
 
+// Fast cached endpoint for good vibes (for carousel)
+app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache) =>
+{
+    try
+    {
+        // Check if cache is ready
+        if (!cacheService.IsReady)
+        {
+            return Results.Ok(new {
+                data = new List<object>(),
+                metadata = new { cacheReady = false }
+            });
+        }
+
+        var allVibes = await cacheService.GetAllVibesAsync();
+
+        // Enrich with avatars (using cache)
+        var enrichedData = new List<Dictionary<string, object>>();
+
+        foreach (var item in allVibes)
+        {
+            var dict = new Dictionary<string, object>();
+
+            // Copy all existing properties
+            foreach (var prop in item.EnumerateObject())
+            {
+                dict[prop.Name] = JsonSerializer.Deserialize<object>(prop.Value.GetRawText())!;
+            }
+
+            // Enrich sender user with avatar
+            if (item.TryGetProperty("senderUser", out var senderUser))
+            {
+                if (senderUser.TryGetProperty("userId", out var senderUserId))
+                {
+                    var avatarUrl = await userCache.GetUserAvatarAsync(senderUserId.GetString()!);
+                    if (avatarUrl != null)
+                    {
+                        var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
+                        senderDict["avatarUrl"] = avatarUrl;
+                        dict["senderUser"] = senderDict;
+                    }
+                }
+            }
+
+            // Enrich recipients with avatars
+            if (item.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
+            {
+                var enrichedRecipients = new List<Dictionary<string, object>>();
+                foreach (var recipient in recipients.EnumerateArray())
+                {
+                    if (recipient.TryGetProperty("userId", out var recipientUserId))
+                    {
+                        var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
+                        var avatarUrl = await userCache.GetUserAvatarAsync(recipientUserId.GetString()!);
+                        if (avatarUrl != null)
+                        {
+                            recipientDict["avatarUrl"] = avatarUrl;
+                        }
+                        enrichedRecipients.Add(recipientDict);
+                    }
+                }
+                dict["recipients"] = enrichedRecipients;
+            }
+
+            enrichedData.Add(dict);
+        }
+
+        return Results.Ok(new {
+            data = enrichedData,
+            metadata = new {
+                cacheReady = true,
+                totalCount = enrichedData.Count
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch cached good vibes: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
 // Monthly leaderboard endpoints
 app.MapGet("/api/stats/monthly/top-senders", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? year, int? month, int? limit) =>
 {
@@ -770,6 +888,7 @@ app.Run("http://localhost:5000");
 
 Console.WriteLine("Server is running on http://localhost:5000");
 Console.WriteLine("Good Vibes list endpoint: http://localhost:5000/api/good-vibes");
+Console.WriteLine("Good Vibes cached endpoint (fast): http://localhost:5000/api/good-vibes/cached");
 Console.WriteLine("Single Good Vibe endpoint: http://localhost:5000/api/good-vibes/{id}");
 Console.WriteLine("Collections endpoint: http://localhost:5000/api/good-vibes/collections");
 Console.WriteLine("User info endpoint: http://localhost:5000/api/users/{userId}");
@@ -787,14 +906,15 @@ public class UserCacheService
     private readonly IMemoryCache _cache;
     private readonly HttpClient _httpClient;
     private readonly ILogger<UserCacheService> _logger;
+    private readonly IConfiguration _configuration;
     private readonly SemaphoreSlim _semaphore = new(10, 10); // Limit concurrent requests
-    private const string OFFICEVIBE_API_KEY = "1dfdd5f52b3c4829adc15e794485eea6";
 
-    public UserCacheService(IMemoryCache cache, HttpClient httpClient, ILogger<UserCacheService> logger)
+    public UserCacheService(IMemoryCache cache, HttpClient httpClient, ILogger<UserCacheService> logger, IConfiguration configuration)
     {
         _cache = cache;
         _httpClient = httpClient;
         _logger = logger;
+        _configuration = configuration;
     }
 
     public async Task<string?> GetUserAvatarAsync(string userId)
@@ -832,13 +952,14 @@ public class UserCacheService
     {
         int maxRetries = 3;
         int baseDelayMs = 1000;
+        var apiKey = _configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
 
         for (int attempt = 0; attempt < maxRetries; attempt++)
         {
             try
             {
                 var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.workleap.com/public/users/{userId}");
-                request.Headers.Add("workleap-subscription-key", OFFICEVIBE_API_KEY);
+                request.Headers.Add("workleap-subscription-key", apiKey);
                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
                 
                 var response = await _httpClient.SendAsync(request);
@@ -891,23 +1012,27 @@ public class GoodVibesCacheService : BackgroundService
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<GoodVibesCacheService> _logger;
+    private readonly IConfiguration _configuration;
     private List<JsonElement> _cachedVibes = new();
     private readonly SemaphoreSlim _semaphore = new(1, 1);
-    private const string OFFICEVIBE_API_KEY = "1dfdd5f52b3c4829adc15e794485eea6";
+    private bool _isReady = false;
     private const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes";
 
-    public GoodVibesCacheService(IHttpClientFactory httpClientFactory, ILogger<GoodVibesCacheService> logger)
+    public GoodVibesCacheService(IHttpClientFactory httpClientFactory, ILogger<GoodVibesCacheService> logger, IConfiguration configuration)
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _configuration = configuration;
     }
+
+    public bool IsReady => _isReady;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("GoodVibesCacheService is starting - fetching all good vibes...");
+        _logger.LogInformation("GoodVibesCacheService is starting - will fetch all good vibes in the background...");
 
-        // Initial load
-        await RefreshCacheAsync();
+        // Start initial load in background without blocking startup
+        _ = Task.Run(RefreshCacheAsync, stoppingToken);
 
         // Refresh every 5 minutes
         while (!stoppingToken.IsCancellationRequested)
@@ -925,6 +1050,7 @@ public class GoodVibesCacheService : BackgroundService
             var allVibes = new List<JsonElement>();
             string? continuationToken = null;
             int pageCount = 0;
+            var apiKey = _configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
 
             do
             {
@@ -935,7 +1061,7 @@ public class GoodVibesCacheService : BackgroundService
                 }
 
                 var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Add("workleap-subscription-key", OFFICEVIBE_API_KEY);
+                request.Headers.Add("workleap-subscription-key", apiKey);
                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
                 var response = await httpClient.SendAsync(request);
@@ -976,7 +1102,8 @@ public class GoodVibesCacheService : BackgroundService
             try
             {
                 _cachedVibes = allVibes;
-                _logger.LogInformation($"Cached {allVibes.Count} good vibes from {pageCount} pages");
+                _isReady = true;
+                _logger.LogInformation("Cached {Count} good vibes from {PageCount} pages - cache is ready", allVibes.Count, pageCount);
             }
             finally
             {
