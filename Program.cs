@@ -650,8 +650,8 @@ app.MapGet("/api/stats/monthly/top-collections", async (
         var topLimit = Math.Min(limit, 100); // Max 100 to prevent abuse
         var allVibes = await cacheService.GetAllVibesAsync();
 
-        // Count collections for the specified month
-        var collectionCounts = new Dictionary<string, (string name, int count)>();
+        // Count collections by name for the specified month
+        var collectionCounts = new Dictionary<string, int>();
 
         foreach (var item in allVibes)
         {
@@ -661,31 +661,24 @@ app.MapGet("/api/stats/monthly/top-collections", async (
                 {
                     if (creationDate.Year == year && creationDate.Month == month)
                     {
-                        // Check if this good vibe has a cardPrompt with collectionId
+                        // Check if this good vibe has a cardPrompt with collectionName
                         if (item.TryGetProperty("cardPrompt", out var cardPromptArray) &&
                             cardPromptArray.ValueKind == JsonValueKind.Array &&
                             cardPromptArray.GetArrayLength() > 0)
                         {
                             var firstPrompt = cardPromptArray[0];
-                            if (firstPrompt.TryGetProperty("collectionId", out var collectionIdProp))
+                            if (firstPrompt.TryGetProperty("collectionName", out var collectionNameProp))
                             {
-                                var collectionId = collectionIdProp.GetString();
-                                if (!string.IsNullOrEmpty(collectionId))
+                                var collectionName = collectionNameProp.GetString();
+                                if (!string.IsNullOrEmpty(collectionName))
                                 {
-                                    var collectionName = "Unknown Collection";
-                                    if (firstPrompt.TryGetProperty("collectionName", out var collectionNameProp))
+                                    if (collectionCounts.ContainsKey(collectionName))
                                     {
-                                        collectionName = collectionNameProp.GetString() ?? "Unknown Collection";
-                                    }
-
-                                    if (collectionCounts.ContainsKey(collectionId))
-                                    {
-                                        var current = collectionCounts[collectionId];
-                                        collectionCounts[collectionId] = (current.name, current.count + 1);
+                                        collectionCounts[collectionName]++;
                                     }
                                     else
                                     {
-                                        collectionCounts[collectionId] = (collectionName, 1);
+                                        collectionCounts[collectionName] = 1;
                                     }
                                 }
                             }
@@ -697,13 +690,12 @@ app.MapGet("/api/stats/monthly/top-collections", async (
 
         // Sort by count and take top N
         var topCollections = collectionCounts
-            .OrderByDescending(kvp => kvp.Value.count)
+            .OrderByDescending(kvp => kvp.Value)
             .Take(topLimit)
             .Select(kvp => new Dictionary<string, object>
             {
-                ["collectionId"] = kvp.Key,
-                ["name"] = kvp.Value.name,
-                ["count"] = kvp.Value.count
+                ["name"] = kvp.Key,
+                ["count"] = kvp.Value
             })
             .ToList();
 
