@@ -638,6 +638,91 @@ app.MapGet("/api/stats/top-recipients", async (HttpClient httpClient, UserCacheS
     }
 });
 
+// Get top collections for a given month
+app.MapGet("/api/stats/monthly/top-collections", async (
+    int year,
+    int month,
+    int limit,
+    GoodVibesCacheService cacheService) =>
+{
+    try
+    {
+        var topLimit = Math.Min(limit, 100); // Max 100 to prevent abuse
+        var allVibes = await cacheService.GetAllVibesAsync();
+
+        // Count collections for the specified month
+        var collectionCounts = new Dictionary<string, (string name, int count)>();
+
+        foreach (var item in allVibes)
+        {
+            if (item.TryGetProperty("creationDate", out var creationDateProp))
+            {
+                if (DateTime.TryParse(creationDateProp.GetString(), out var creationDate))
+                {
+                    if (creationDate.Year == year && creationDate.Month == month)
+                    {
+                        // Check if this good vibe has a cardPrompt with collectionId
+                        if (item.TryGetProperty("cardPrompt", out var cardPromptArray) &&
+                            cardPromptArray.ValueKind == JsonValueKind.Array &&
+                            cardPromptArray.GetArrayLength() > 0)
+                        {
+                            var firstPrompt = cardPromptArray[0];
+                            if (firstPrompt.TryGetProperty("collectionId", out var collectionIdProp))
+                            {
+                                var collectionId = collectionIdProp.GetString();
+                                if (!string.IsNullOrEmpty(collectionId))
+                                {
+                                    var collectionName = "Unknown Collection";
+                                    if (firstPrompt.TryGetProperty("collectionName", out var collectionNameProp))
+                                    {
+                                        collectionName = collectionNameProp.GetString() ?? "Unknown Collection";
+                                    }
+
+                                    if (collectionCounts.ContainsKey(collectionId))
+                                    {
+                                        var current = collectionCounts[collectionId];
+                                        collectionCounts[collectionId] = (current.name, current.count + 1);
+                                    }
+                                    else
+                                    {
+                                        collectionCounts[collectionId] = (collectionName, 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        var topCollections = collectionCounts
+            .OrderByDescending(kvp => kvp.Value.count)
+            .Take(topLimit)
+            .Select(kvp => new Dictionary<string, object>
+            {
+                ["collectionId"] = kvp.Key,
+                ["name"] = kvp.Value.name,
+                ["count"] = kvp.Value.count
+            })
+            .ToList();
+
+        return Results.Ok(new
+        {
+            topCollections = topCollections,
+            year = year,
+            month = month
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            detail: $"Failed to fetch top collections: {ex.Message}",
+            statusCode: 500
+        );
+    }
+});
+
 // Get all available months with good vibes data
 app.MapGet("/api/stats/available-months", async (GoodVibesCacheService cacheService) =>
 {
