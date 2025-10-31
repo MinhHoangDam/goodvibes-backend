@@ -13,29 +13,18 @@ var builder = WebApplication.CreateBuilder(args);
 var keyVaultUrl = builder.Configuration["KeyVaultUrl"];
 if (!string.IsNullOrEmpty(keyVaultUrl))
 {
-    // Get the User-Assigned Managed Identity Client ID from configuration
-    var managedIdentityClientId = builder.Configuration["ManagedIdentityClientId"];
+    Console.WriteLine($"🔐 Configuring Key Vault: {keyVaultUrl}");
 
-    Console.WriteLine($"Configuring Key Vault: {keyVaultUrl}");
-    if (!string.IsNullOrEmpty(managedIdentityClientId))
-    {
-        Console.WriteLine($"Using User-Assigned Managed Identity: {managedIdentityClientId}");
-    }
+    // Use ManagedIdentityCredential for Azure (works with both system-assigned and user-assigned)
+    // For local development, falls back to DefaultAzureCredential (uses Azure CLI, VS, etc.)
+    var credential = new DefaultAzureCredential();
 
-    // Create credential for user-assigned managed identity
-    Azure.Core.TokenCredential credential;
-    if (!string.IsNullOrEmpty(managedIdentityClientId))
-    {
-        credential = new ManagedIdentityCredential(managedIdentityClientId);
-    }
-    else
-    {
-        // Fallback for local development
-        credential = new DefaultAzureCredential();
-    }
+    Console.WriteLine("✓ Using System-Assigned Managed Identity in Azure (or DefaultAzureCredential locally)");
 
     var secretClient = new SecretClient(new Uri(keyVaultUrl), credential);
     builder.Configuration.AddAzureKeyVault(secretClient, new KeyVaultSecretManager());
+
+    Console.WriteLine("✓ Key Vault configuration completed");
 }
 
 // Configure port for deployment - OVERRIDE default behavior
@@ -84,7 +73,9 @@ if (app.Environment.IsDevelopment())
 app.UseCors("AllowAll");
 
 // Get API key from configuration (Key Vault in production, appsettings in development)
-var OFFICEVIBE_API_KEY = app.Configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6"; // Fallback for local dev
+// In Azure Key Vault, the secret is named "WorkleapCOToken"
+// Locally, we use "OfficevibeApiKey" from appsettings.json
+var OFFICEVIBE_API_KEY = app.Configuration["WorkleapCOToken"] ?? app.Configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
 const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes";
 
 Console.WriteLine($"Using Officevibe API Key: {OFFICEVIBE_API_KEY[..Math.Min(8, OFFICEVIBE_API_KEY.Length)]}...");
@@ -96,13 +87,66 @@ app.MapGet("/health", () =>
 });
 
 // Debug endpoint to see environment
-app.MapGet("/debug", () => 
+app.MapGet("/debug", () =>
 {
-    return Results.Ok(new { 
+    return Results.Ok(new {
         port = Environment.GetEnvironmentVariable("PORT") ?? "not set",
         environment = app.Environment.EnvironmentName,
         urls = string.Join(", ", app.Urls)
     });
+});
+
+// Key Vault validation endpoint - Test if we can access Key Vault secrets
+app.MapGet("/api/validate-keyvault", () =>
+{
+    try
+    {
+        var keyVaultUrl = app.Configuration["KeyVaultUrl"];
+        var hasKeyVault = !string.IsNullOrEmpty(keyVaultUrl);
+
+        // Try to read the API key from configuration
+        // If Key Vault is configured, this will attempt to read from it
+        var apiKeyFromConfig = app.Configuration["WorkleapCOToken"];
+        var hasApiKey = !string.IsNullOrEmpty(apiKeyFromConfig);
+
+        // Fallback check
+        var fallbackApiKey = app.Configuration["OfficevibeApiKey"];
+        var hasFallback = !string.IsNullOrEmpty(fallbackApiKey);
+
+        var result = new
+        {
+            success = hasApiKey || hasFallback,
+            keyVaultConfigured = hasKeyVault,
+            keyVaultUrl = keyVaultUrl ?? "not configured",
+            apiKeySource = hasApiKey ? "WorkleapCOToken (Key Vault)" :
+                          hasFallback ? "OfficevibeApiKey (local config)" :
+                          "none - API key not found!",
+            apiKeyFound = hasApiKey || hasFallback,
+            apiKeyPreview = (hasApiKey || hasFallback)
+                ? $"{(apiKeyFromConfig ?? fallbackApiKey)![..Math.Min(8, (apiKeyFromConfig ?? fallbackApiKey)!.Length)]}..."
+                : "NOT FOUND",
+            environment = app.Environment.EnvironmentName,
+            timestamp = DateTime.UtcNow
+        };
+
+        if (!result.success)
+        {
+            return Results.Json(result, statusCode: 500);
+        }
+
+        return Results.Ok(result);
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new
+        {
+            success = false,
+            error = ex.Message,
+            errorType = ex.GetType().Name,
+            stackTrace = ex.StackTrace,
+            timestamp = DateTime.UtcNow
+        }, statusCode: 500);
+    }
 });
 
 // Good Vibes list endpoint
@@ -952,7 +996,7 @@ public class UserCacheService
     {
         int maxRetries = 3;
         int baseDelayMs = 1000;
-        var apiKey = _configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
+        var apiKey = _configuration["WorkleapCOToken"] ?? _configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
 
         for (int attempt = 0; attempt < maxRetries; attempt++)
         {
@@ -1050,7 +1094,7 @@ public class GoodVibesCacheService : BackgroundService
             var allVibes = new List<JsonElement>();
             string? continuationToken = null;
             int pageCount = 0;
-            var apiKey = _configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
+            var apiKey = _configuration["WorkleapCOToken"] ?? _configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
 
             do
             {

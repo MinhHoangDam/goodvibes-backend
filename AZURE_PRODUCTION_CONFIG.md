@@ -2,6 +2,12 @@
 
 ## Information from IT Department
 
+### App Service
+- **Name**: goodvibes-backend
+- **URL**: https://goodvibes-backend-egdfa2amgua9gmbk.canadacentral-01.azurewebsites.net
+- **Resource Group**: temp-minh-feng-1401
+- **Region**: Canada Central
+
 ### User-Assigned Managed Identity
 - **Name**: goodvibes-carousell-app-identity
 - **Client ID**: 852d3fc6-436b-439e-a419-b61d0ddf8aca
@@ -9,7 +15,7 @@
 
 ### Key Vault
 - **URL**: https://productopsprodvault.vault.azure.net/
-- **Secret Name**: *[PENDING - Need to ask IT]*
+- **Secret Name**: WorkleapCOToken
 
 ---
 
