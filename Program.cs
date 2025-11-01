@@ -760,6 +760,70 @@ app.MapGet("/api/stats/available-months", async (GoodVibesCacheService cacheServ
     }
 });
 
+// Diagnostic endpoint to test avatar fetching for a specific user
+app.MapGet("/api/debug/user-avatar/{userId}", async (string userId, UserCacheService userCache, IConfiguration configuration) =>
+{
+    try
+    {
+        var apiKey = configuration["WorkleapCOToken"] ?? configuration["OfficevibeApiKey"] ?? "1dfdd5f52b3c4829adc15e794485eea6";
+
+        // Make direct API call to fetch user data
+        var httpClient = new HttpClient();
+        var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.workleap.com/public/users/{userId}");
+        request.Headers.Add("workleap-subscription-key", apiKey);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var response = await httpClient.SendAsync(request);
+        var content = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return Results.Ok(new
+            {
+                userId,
+                success = false,
+                statusCode = (int)response.StatusCode,
+                error = $"HTTP {response.StatusCode}",
+                responseBody = content
+            });
+        }
+
+        var userDoc = JsonDocument.Parse(content);
+        var hasExtension = userDoc.RootElement.TryGetProperty("urn:workleap:params:scim:schemas:extension:user:2.0:User", out var extension);
+
+        Dictionary<string, string>? imageUrlsDict = null;
+        if (hasExtension && extension.TryGetProperty("imageUrls", out var imageUrls))
+        {
+            imageUrlsDict = JsonSerializer.Deserialize<Dictionary<string, string>>(imageUrls.GetRawText());
+        }
+
+        var result = new
+        {
+            userId,
+            success = true,
+            hasExtensionSchema = hasExtension,
+            hasImageUrls = imageUrlsDict != null,
+            imageUrls = imageUrlsDict,
+            avatarFromCache = await userCache.GetUserAvatarAsync(userId),
+            availableProperties = userDoc.RootElement.EnumerateObject().Select(p => p.Name).ToList(),
+            extensionProperties = hasExtension ? extension.EnumerateObject().Select(p => p.Name).ToList() : null,
+            fullResponse = JsonSerializer.Deserialize<Dictionary<string, object>>(content)
+        };
+
+        return Results.Ok(result);
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new
+        {
+            userId,
+            success = false,
+            error = ex.Message,
+            stackTrace = ex.StackTrace
+        });
+    }
+});
+
 // Fast cached endpoint for good vibes (for carousel)
 app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack) =>
 {
@@ -1129,20 +1193,51 @@ public class UserCacheService
                         {
                         // Try to get appropriately sized image for avatars
                         if (imageUrls.TryGetProperty("32x32", out var size32))
+                        {
+                            _logger.LogDebug("Found 32x32 avatar for user {UserId}", userId);
                             return size32.GetString();
+                        }
                         if (imageUrls.TryGetProperty("48x48", out var size48))
+                        {
+                            _logger.LogDebug("Found 48x48 avatar for user {UserId}", userId);
                             return size48.GetString();
+                        }
                         if (imageUrls.TryGetProperty("24x24", out var size24))
+                        {
+                            _logger.LogDebug("Found 24x24 avatar for user {UserId}", userId);
                             return size24.GetString();
+                        }
                         if (imageUrls.TryGetProperty("64x64", out var size64))
+                        {
+                            _logger.LogDebug("Found 64x64 avatar for user {UserId}", userId);
                             return size64.GetString();
+                        }
                         // Fallback to any available size
                         foreach (var prop in imageUrls.EnumerateObject())
-                            return prop.Value.GetString();                        }
+                        {
+                            _logger.LogDebug("Found {Size} avatar for user {UserId}", prop.Name, userId);
+                            return prop.Value.GetString();
+                        }
+
+                        // imageUrls exists but is empty
+                        _logger.LogWarning("User {UserId} has imageUrls property but no sizes available. ImageUrls: {ImageUrls}", userId, imageUrls.GetRawText());
+                        }
+                        else
+                        {
+                            // Extension exists but no imageUrls property
+                            _logger.LogWarning("User {UserId} has extension schema but missing imageUrls property. Extension keys: {Keys}",
+                                userId, string.Join(", ", extension.EnumerateObject().Select(p => p.Name)));
+                        }
+                    }
+                    else
+                    {
+                        // No extension schema at all - log what properties are available
+                        var availableProps = string.Join(", ", userDoc.RootElement.EnumerateObject().Select(p => p.Name));
+                        _logger.LogWarning("User {UserId} missing extension schema. Available properties: {Properties}", userId, availableProps);
                     }
 
-                    // No image URL found in extension schema
-                    _logger.LogInformation("No avatar found for user {UserId} - missing imageUrls in extension schema", userId);
+                    // No image URL found - return null
+                    return null;
                 }
                 else
                 {
