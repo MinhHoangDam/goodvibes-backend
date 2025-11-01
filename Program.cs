@@ -1145,10 +1145,14 @@ public class UserCacheService
             }
 
             var avatar = await FetchUserAvatarWithRetryAsync(userId);
-            
-            // Cache for 1 hour
-            _cache.Set(cacheKey, avatar, TimeSpan.FromHours(1));
-            
+
+            // Only cache successful avatar fetches (don't cache null values)
+            // This allows retries for failed fetches instead of caching the failure
+            if (avatar != null)
+            {
+                _cache.Set(cacheKey, avatar, TimeSpan.FromHours(1));
+            }
+
             return avatar;
         }
         finally
