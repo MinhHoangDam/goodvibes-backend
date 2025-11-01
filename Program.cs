@@ -661,15 +661,16 @@ app.MapGet("/api/stats/monthly/top-collections", async (
                 {
                     if (creationDate.Year == year && creationDate.Month == month)
                     {
-                        // Check if this good vibe has a cardPrompt with collectionName
-                        if (item.TryGetProperty("cardPrompt", out var cardPromptArray) &&
-                            cardPromptArray.ValueKind == JsonValueKind.Array &&
-                            cardPromptArray.GetArrayLength() > 0)
+                        // Check if this good vibe has a collectionName (array of LocalizedText objects)
+                        if (item.TryGetProperty("collectionName", out var collectionNameArray) &&
+                            collectionNameArray.ValueKind == JsonValueKind.Array &&
+                            collectionNameArray.GetArrayLength() > 0)
                         {
-                            var firstPrompt = cardPromptArray[0];
-                            if (firstPrompt.TryGetProperty("collectionName", out var collectionNameProp))
+                            // Get the first localized text entry
+                            var firstLocalizedText = collectionNameArray[0];
+                            if (firstLocalizedText.TryGetProperty("text", out var textProp))
                             {
-                                var collectionName = collectionNameProp.GetString();
+                                var collectionName = textProp.GetString();
                                 if (!string.IsNullOrEmpty(collectionName))
                                 {
                                     if (collectionCounts.ContainsKey(collectionName))
