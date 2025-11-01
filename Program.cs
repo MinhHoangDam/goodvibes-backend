@@ -825,12 +825,13 @@ app.MapGet("/api/debug/user-avatar/{userId}", async (string userId, UserCacheSer
 });
 
 // Fast cached endpoint for good vibes (for carousel)
-app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack, int? daysBack, string? avatarSize) =>
+app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack, int? daysBack, string? avatarSize, bool? skipAvatars) =>
 {
     try
     {
         // Default to 32x32 for small screens, allow override for large displays
         var requestedAvatarSize = avatarSize ?? "32x32";
+        var shouldSkipAvatars = skipAvatars ?? false;
 
         // Check if cache is ready
         if (!cacheService.IsReady)
@@ -875,57 +876,70 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
             }).ToList();
         }
 
-        // Enrich with avatars (using cache)
-        // Note: First call after deployment may be slow (~20s) while avatars are fetched
-        // Subsequent calls will be fast (<1s) due to avatar caching (1 hour cache)
+        // Enrich with avatars (using cache) - optional for performance
         var enrichedData = new List<Dictionary<string, object>>();
 
-        foreach (var item in allVibes)
+        if (shouldSkipAvatars)
         {
-            var dict = new Dictionary<string, object>();
-
-            // Copy all existing properties
-            foreach (var prop in item.EnumerateObject())
+            // Fast path: Skip avatar enrichment for instant response
+            foreach (var item in allVibes)
             {
-                dict[prop.Name] = JsonSerializer.Deserialize<object>(prop.Value.GetRawText())!;
+                var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(item.GetRawText())!;
+                enrichedData.Add(dict);
             }
-
-            // Enrich sender user with avatar
-            if (item.TryGetProperty("senderUser", out var senderUser))
+        }
+        else
+        {
+            // Slower path: Enrich with avatars (may be slow if avatars not cached)
+            // Note: First call after deployment may be slow (~20s) while avatars are fetched
+            // Subsequent calls will be fast (<1s) due to avatar caching (1 hour cache)
+            foreach (var item in allVibes)
             {
-                if (senderUser.TryGetProperty("userId", out var senderUserId))
-                {
-                    var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
-                    var userId = senderUserId.GetString()!;
-                    var avatarUrl = await userCache.GetUserAvatarAsync(userId, requestedAvatarSize);
+                var dict = new Dictionary<string, object>();
 
-                    // Always add avatarUrl property (empty string if fetch failed)
-                    senderDict["avatarUrl"] = (object?)avatarUrl ?? "";
-                    dict["senderUser"] = senderDict;
+                // Copy all existing properties
+                foreach (var prop in item.EnumerateObject())
+                {
+                    dict[prop.Name] = JsonSerializer.Deserialize<object>(prop.Value.GetRawText())!;
                 }
-            }
 
-            // Enrich recipients with avatars
-            if (item.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
-            {
-                var enrichedRecipients = new List<Dictionary<string, object>>();
-                foreach (var recipient in recipients.EnumerateArray())
+                // Enrich sender user with avatar
+                if (item.TryGetProperty("senderUser", out var senderUser))
                 {
-                    if (recipient.TryGetProperty("userId", out var recipientUserId))
+                    if (senderUser.TryGetProperty("userId", out var senderUserId))
                     {
-                        var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
-                        var userId = recipientUserId.GetString()!;
+                        var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
+                        var userId = senderUserId.GetString()!;
                         var avatarUrl = await userCache.GetUserAvatarAsync(userId, requestedAvatarSize);
 
                         // Always add avatarUrl property (empty string if fetch failed)
-                        recipientDict["avatarUrl"] = (object?)avatarUrl ?? "";
-                        enrichedRecipients.Add(recipientDict);
+                        senderDict["avatarUrl"] = (object?)avatarUrl ?? "";
+                        dict["senderUser"] = senderDict;
                     }
                 }
-                dict["recipients"] = enrichedRecipients;
-            }
 
-            enrichedData.Add(dict);
+                // Enrich recipients with avatars
+                if (item.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
+                {
+                    var enrichedRecipients = new List<Dictionary<string, object>>();
+                    foreach (var recipient in recipients.EnumerateArray())
+                    {
+                        if (recipient.TryGetProperty("userId", out var recipientUserId))
+                        {
+                            var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
+                            var userId = recipientUserId.GetString()!;
+                            var avatarUrl = await userCache.GetUserAvatarAsync(userId, requestedAvatarSize);
+
+                            // Always add avatarUrl property (empty string if fetch failed)
+                            recipientDict["avatarUrl"] = (object?)avatarUrl ?? "";
+                            enrichedRecipients.Add(recipientDict);
+                        }
+                    }
+                    dict["recipients"] = enrichedRecipients;
+                }
+
+                enrichedData.Add(dict);
+            }
         }
 
         var totalInCache = await cacheService.GetAllVibesAsync();
