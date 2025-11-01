@@ -219,13 +219,13 @@ app.MapGet("/api/good-vibes", async (HttpClient httpClient, UserCacheService use
                 {
                     if (senderUser.TryGetProperty("userId", out var senderUserId))
                     {
-                        var avatarUrl = await userCache.GetUserAvatarAsync(senderUserId.GetString()!);
-                        if (avatarUrl != null)
-                        {
-                            var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
-                            senderDict["avatarUrl"] = avatarUrl;
-                            dict["senderUser"] = senderDict;
-                        }
+                        var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
+                        var userId = senderUserId.GetString()!;
+                        var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+
+                        // Always add avatarUrl property (null if fetch failed)
+                        senderDict["avatarUrl"] = (object?)avatarUrl ?? "";
+                        dict["senderUser"] = senderDict;
                     }
                 }
                 
@@ -238,11 +238,11 @@ app.MapGet("/api/good-vibes", async (HttpClient httpClient, UserCacheService use
                         if (recipient.TryGetProperty("userId", out var recipientUserId))
                         {
                             var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
-                            var avatarUrl = await userCache.GetUserAvatarAsync(recipientUserId.GetString()!);
-                            if (avatarUrl != null)
-                            {
-                                recipientDict["avatarUrl"] = avatarUrl;
-                            }
+                            var userId = recipientUserId.GetString()!;
+                            var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+
+                            // Always add avatarUrl property (empty string if fetch failed)
+                            recipientDict["avatarUrl"] = (object?)avatarUrl ?? "";
                             enrichedRecipients.Add(recipientDict);
                         }
                     }
@@ -318,16 +318,16 @@ app.MapGet("/api/good-vibes/{goodVibeId}", async (HttpClient httpClient, UserCac
         {
             if (senderUser.TryGetProperty("userId", out var senderUserId))
             {
-                var avatarUrl = await userCache.GetUserAvatarAsync(senderUserId.GetString()!);
-                if (avatarUrl != null)
-                {
-                    var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
-                    senderDict["avatarUrl"] = avatarUrl;
-                    dict["senderUser"] = senderDict;
-                }
+                var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
+                var userId = senderUserId.GetString()!;
+                var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+
+                // Always add avatarUrl property (empty string if fetch failed)
+                senderDict["avatarUrl"] = (object?)avatarUrl ?? "";
+                dict["senderUser"] = senderDict;
             }
         }
-        
+
         // Enrich recipients with avatars
         if (root.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
         {
@@ -337,11 +337,11 @@ app.MapGet("/api/good-vibes/{goodVibeId}", async (HttpClient httpClient, UserCac
                 if (recipient.TryGetProperty("userId", out var recipientUserId))
                 {
                     var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
-                    var avatarUrl = await userCache.GetUserAvatarAsync(recipientUserId.GetString()!);
-                    if (avatarUrl != null)
-                    {
-                        recipientDict["avatarUrl"] = avatarUrl;
-                    }
+                    var userId = recipientUserId.GetString()!;
+                    var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+
+                    // Always add avatarUrl property (empty string if fetch failed)
+                    recipientDict["avatarUrl"] = (object?)avatarUrl ?? "";
                     enrichedRecipients.Add(recipientDict);
                 }
             }
@@ -794,13 +794,13 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
             {
                 if (senderUser.TryGetProperty("userId", out var senderUserId))
                 {
-                    var avatarUrl = await userCache.GetUserAvatarAsync(senderUserId.GetString()!);
-                    if (avatarUrl != null)
-                    {
-                        var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
-                        senderDict["avatarUrl"] = avatarUrl;
-                        dict["senderUser"] = senderDict;
-                    }
+                    var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
+                    var userId = senderUserId.GetString()!;
+                    var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+
+                    // Always add avatarUrl property (empty string if fetch failed)
+                    senderDict["avatarUrl"] = (object?)avatarUrl ?? "";
+                    dict["senderUser"] = senderDict;
                 }
             }
 
@@ -813,11 +813,11 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
                     if (recipient.TryGetProperty("userId", out var recipientUserId))
                     {
                         var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
-                        var avatarUrl = await userCache.GetUserAvatarAsync(recipientUserId.GetString()!);
-                        if (avatarUrl != null)
-                        {
-                            recipientDict["avatarUrl"] = avatarUrl;
-                        }
+                        var userId = recipientUserId.GetString()!;
+                        var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+
+                        // Always add avatarUrl property (empty string if fetch failed)
+                        recipientDict["avatarUrl"] = (object?)avatarUrl ?? "";
                         enrichedRecipients.Add(recipientDict);
                     }
                 }
@@ -1089,7 +1089,7 @@ public class UserCacheService
                 if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                 {
                     var delay = TimeSpan.FromMilliseconds(baseDelayMs * Math.Pow(2, attempt));
-                    _logger.LogWarning($"Rate limited for user {userId}, waiting {delay.TotalSeconds}s");
+                    _logger.LogWarning("Rate limited for user {UserId}, waiting {DelaySeconds}s", userId, delay.TotalSeconds);
                     await Task.Delay(delay);
                     continue;
                 }
@@ -1098,7 +1098,7 @@ public class UserCacheService
                 {
                     var content = await response.Content.ReadAsStringAsync();
                     var userDoc = JsonDocument.Parse(content);
-                    
+
                     // Try to get image URL from the extension schema
                     if (userDoc.RootElement.TryGetProperty("urn:workleap:params:scim:schemas:extension:user:2.0:User", out var extension))
                     {
@@ -1117,11 +1117,18 @@ public class UserCacheService
                         foreach (var prop in imageUrls.EnumerateObject())
                             return prop.Value.GetString();                        }
                     }
+
+                    // No image URL found in extension schema
+                    _logger.LogInformation("No avatar found for user {UserId} - missing imageUrls in extension schema", userId);
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to fetch avatar for user {UserId}: HTTP {StatusCode}", userId, response.StatusCode);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Error fetching avatar for user {userId}, attempt {attempt + 1}");
+                _logger.LogError(ex, "Error fetching avatar for user {UserId}, attempt {Attempt}", userId, attempt + 1);
             }
         }
 
