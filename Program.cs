@@ -761,7 +761,7 @@ app.MapGet("/api/stats/available-months", async (GoodVibesCacheService cacheServ
 });
 
 // Fast cached endpoint for good vibes (for carousel)
-app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache) =>
+app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack) =>
 {
     try
     {
@@ -775,6 +775,23 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
         }
 
         var allVibes = await cacheService.GetAllVibesAsync();
+
+        // Filter by date range if monthsBack is specified
+        if (monthsBack.HasValue && monthsBack.Value > 0)
+        {
+            var cutoffDate = DateTime.UtcNow.AddMonths(-monthsBack.Value);
+            allVibes = allVibes.Where(item =>
+            {
+                if (item.TryGetProperty("creationDate", out var creationDate))
+                {
+                    if (DateTime.TryParse(creationDate.GetString(), out var date))
+                    {
+                        return date >= cutoffDate;
+                    }
+                }
+                return false;
+            }).ToList();
+        }
 
         // Enrich with avatars (using cache)
         // Note: First call after deployment may be slow (~20s) while avatars are fetched
@@ -829,11 +846,15 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
             enrichedData.Add(dict);
         }
 
+        var totalInCache = await cacheService.GetAllVibesAsync();
+
         return Results.Ok(new {
             data = enrichedData,
             metadata = new {
                 cacheReady = true,
-                totalCount = enrichedData.Count
+                totalCount = totalInCache.Count,
+                filteredCount = enrichedData.Count,
+                monthsBack = monthsBack
             }
         });
     }
