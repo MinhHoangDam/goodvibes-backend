@@ -825,10 +825,13 @@ app.MapGet("/api/debug/user-avatar/{userId}", async (string userId, UserCacheSer
 });
 
 // Fast cached endpoint for good vibes (for carousel)
-app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack) =>
+app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack, string? avatarSize) =>
 {
     try
     {
+        // Default to 32x32 for small screens, allow override for large displays
+        var requestedAvatarSize = avatarSize ?? "32x32";
+
         // Check if cache is ready
         if (!cacheService.IsReady)
         {
@@ -879,7 +882,7 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
                 {
                     var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
                     var userId = senderUserId.GetString()!;
-                    var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+                    var avatarUrl = await userCache.GetUserAvatarAsync(userId, requestedAvatarSize);
 
                     // Always add avatarUrl property (empty string if fetch failed)
                     senderDict["avatarUrl"] = (object?)avatarUrl ?? "";
@@ -897,7 +900,7 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
                     {
                         var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
                         var userId = recipientUserId.GetString()!;
-                        var avatarUrl = await userCache.GetUserAvatarAsync(userId);
+                        var avatarUrl = await userCache.GetUserAvatarAsync(userId, requestedAvatarSize);
 
                         // Always add avatarUrl property (empty string if fetch failed)
                         recipientDict["avatarUrl"] = (object?)avatarUrl ?? "";
@@ -1126,10 +1129,10 @@ public class UserCacheService
         _configuration = configuration;
     }
 
-    public async Task<string?> GetUserAvatarAsync(string userId)
+    public async Task<string?> GetUserAvatarAsync(string userId, string preferredSize = "32x32")
     {
-        string cacheKey = $"user_avatar_{userId}";
-        
+        string cacheKey = $"user_avatar_{userId}_{preferredSize}";
+
         if (_cache.TryGetValue(cacheKey, out string? cachedAvatar))
         {
             return cachedAvatar;
@@ -1144,7 +1147,7 @@ public class UserCacheService
                 return cachedAvatar;
             }
 
-            var avatar = await FetchUserAvatarWithRetryAsync(userId);
+            var avatar = await FetchUserAvatarWithRetryAsync(userId, preferredSize);
 
             // Cache strategy:
             // - Successful fetches: cache for 1 hour
@@ -1167,7 +1170,7 @@ public class UserCacheService
         }
     }
 
-    private async Task<string?> FetchUserAvatarWithRetryAsync(string userId)
+    private async Task<string?> FetchUserAvatarWithRetryAsync(string userId, string preferredSize = "32x32")
     {
         int maxRetries = 3;
         int baseDelayMs = 1000;
@@ -1180,9 +1183,9 @@ public class UserCacheService
                 var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.workleap.com/public/users/{userId}");
                 request.Headers.Add("workleap-subscription-key", apiKey);
                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                
+
                 var response = await _httpClient.SendAsync(request);
-                
+
                 if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                 {
                     var delay = TimeSpan.FromMilliseconds(baseDelayMs * Math.Pow(2, attempt));
@@ -1201,32 +1204,33 @@ public class UserCacheService
                     {
                         if (extension.TryGetProperty("imageUrls", out var imageUrls))
                         {
-                        // Try to get appropriately sized image for avatars
-                        if (imageUrls.TryGetProperty("32x32", out var size32))
+                        // Try preferred size first
+                        if (imageUrls.TryGetProperty(preferredSize, out var preferredImg))
                         {
-                            _logger.LogDebug("Found 32x32 avatar for user {UserId}", userId);
-                            return size32.GetString();
+                            _logger.LogDebug("Found {Size} avatar for user {UserId}", preferredSize, userId);
+                            return preferredImg.GetString();
                         }
-                        if (imageUrls.TryGetProperty("48x48", out var size48))
+
+                        // Fallback priority based on requested size
+                        // For large sizes (128x128+), try larger sizes first, then fall back to smaller
+                        // For small sizes (32x32, 48x48), try exact or smaller first
+                        var sizeFallbacks = preferredSize switch
                         {
-                            _logger.LogDebug("Found 48x48 avatar for user {UserId}", userId);
-                            return size48.GetString();
-                        }
-                        if (imageUrls.TryGetProperty("24x24", out var size24))
+                            "256x256" => new[] { "256x256", "128x128", "64x64", "48x48", "32x32", "24x24" },
+                            "128x128" => new[] { "128x128", "256x256", "64x64", "48x48", "32x32", "24x24" },
+                            "64x64" => new[] { "64x64", "128x128", "48x48", "32x32", "24x24", "256x256" },
+                            "48x48" => new[] { "48x48", "64x64", "32x32", "24x24", "128x128", "256x256" },
+                            "32x32" => new[] { "32x32", "48x48", "24x24", "64x64", "128x128", "256x256" },
+                            _ => new[] { "32x32", "48x48", "64x64", "24x24", "128x128", "256x256" }
+                        };
+
+                        foreach (var size in sizeFallbacks)
                         {
-                            _logger.LogDebug("Found 24x24 avatar for user {UserId}", userId);
-                            return size24.GetString();
-                        }
-                        if (imageUrls.TryGetProperty("64x64", out var size64))
-                        {
-                            _logger.LogDebug("Found 64x64 avatar for user {UserId}", userId);
-                            return size64.GetString();
-                        }
-                        // Fallback to any available size
-                        foreach (var prop in imageUrls.EnumerateObject())
-                        {
-                            _logger.LogDebug("Found {Size} avatar for user {UserId}", prop.Name, userId);
-                            return prop.Value.GetString();
+                            if (imageUrls.TryGetProperty(size, out var sizeImg))
+                            {
+                                _logger.LogDebug("Found {Size} avatar for user {UserId} (requested {PreferredSize})", size, userId, preferredSize);
+                                return sizeImg.GetString();
+                            }
                         }
 
                         // imageUrls exists but is empty
