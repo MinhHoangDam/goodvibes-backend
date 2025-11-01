@@ -825,7 +825,7 @@ app.MapGet("/api/debug/user-avatar/{userId}", async (string userId, UserCacheSer
 });
 
 // Fast cached endpoint for good vibes (for carousel)
-app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack, string? avatarSize) =>
+app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, UserCacheService userCache, int? monthsBack, int? daysBack, string? avatarSize) =>
 {
     try
     {
@@ -843,8 +843,23 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
 
         var allVibes = await cacheService.GetAllVibesAsync();
 
-        // Filter by date range if monthsBack is specified
-        if (monthsBack.HasValue && monthsBack.Value > 0)
+        // Filter by date range - daysBack takes precedence over monthsBack
+        if (daysBack.HasValue && daysBack.Value > 0)
+        {
+            var cutoffDate = DateTime.UtcNow.AddDays(-daysBack.Value);
+            allVibes = allVibes.Where(item =>
+            {
+                if (item.TryGetProperty("creationDate", out var creationDate))
+                {
+                    if (DateTime.TryParse(creationDate.GetString(), out var date))
+                    {
+                        return date >= cutoffDate;
+                    }
+                }
+                return false;
+            }).ToList();
+        }
+        else if (monthsBack.HasValue && monthsBack.Value > 0)
         {
             var cutoffDate = DateTime.UtcNow.AddMonths(-monthsBack.Value);
             allVibes = allVibes.Where(item =>
