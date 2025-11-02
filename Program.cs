@@ -80,8 +80,13 @@ const string OFFICEVIBE_API_URL = "https://api.workleap.com/officevibe/goodvibes
 
 Console.WriteLine($"Using Officevibe API Key: {OFFICEVIBE_API_KEY[..Math.Min(8, OFFICEVIBE_API_KEY.Length)]}...");
 
-// Health check endpoint
-app.MapGet("/health", () => 
+// Health check endpoint - accepts both GET and POST for compatibility with monitoring services
+app.MapGet("/health", () =>
+{
+    return Results.Ok(new { status = "ok", message = "Server is running" });
+});
+
+app.MapPost("/health", () =>
 {
     return Results.Ok(new { status = "ok", message = "Server is running" });
 });
