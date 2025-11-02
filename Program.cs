@@ -1398,12 +1398,63 @@ public class GoodVibesCacheService : BackgroundService
 
             } while (!string.IsNullOrEmpty(continuationToken));
 
+            // Fetch replies for Good Vibes that have replies
+            _logger.LogInformation("Fetching replies for Good Vibes with replyCount > 0...");
+            var vibesWithReplies = 0;
+            var vibesWithRepliesEnriched = new List<JsonElement>();
+
+            foreach (var vibe in allVibes)
+            {
+                // Check if this vibe has replies
+                if (vibe.TryGetProperty("replyCount", out var replyCountProp) &&
+                    replyCountProp.GetInt32() > 0 &&
+                    vibe.TryGetProperty("goodVibeId", out var goodVibeIdProp))
+                {
+                    var goodVibeId = goodVibeIdProp.GetString();
+                    try
+                    {
+                        // Fetch the full Good Vibe with replies
+                        var vibeUrl = $"{OFFICEVIBE_API_URL}/{goodVibeId}";
+                        var vibeRequest = new HttpRequestMessage(HttpMethod.Get, vibeUrl);
+                        vibeRequest.Headers.Add("workleap-subscription-key", apiKey);
+                        vibeRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+                        var vibeResponse = await httpClient.SendAsync(vibeRequest);
+
+                        if (vibeResponse.IsSuccessStatusCode)
+                        {
+                            var vibeContent = await vibeResponse.Content.ReadAsStringAsync();
+                            using var vibeDoc = JsonDocument.Parse(vibeContent);
+                            vibesWithRepliesEnriched.Add(vibeDoc.RootElement.Clone());
+                            vibesWithReplies++;
+                        }
+                        else
+                        {
+                            // If fetch fails, keep the original vibe without replies
+                            vibesWithRepliesEnriched.Add(vibe);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to fetch replies for Good Vibe {GoodVibeId}", goodVibeId);
+                        // Keep the original vibe without replies
+                        vibesWithRepliesEnriched.Add(vibe);
+                    }
+                }
+                else
+                {
+                    // No replies, keep as-is
+                    vibesWithRepliesEnriched.Add(vibe);
+                }
+            }
+
             await _semaphore.WaitAsync();
             try
             {
-                _cachedVibes = allVibes;
+                _cachedVibes = vibesWithRepliesEnriched;
                 _isReady = true;
-                _logger.LogInformation("Cached {Count} good vibes from {PageCount} pages - cache is ready", allVibes.Count, pageCount);
+                _logger.LogInformation("Cached {Count} good vibes from {PageCount} pages ({RepliesCount} with replies) - cache is ready",
+                    vibesWithRepliesEnriched.Count, pageCount, vibesWithReplies);
             }
             finally
             {
