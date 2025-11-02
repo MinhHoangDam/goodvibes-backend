@@ -841,7 +841,10 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
     {
         // Default to 32x32 for small screens, allow override for large displays
         var requestedAvatarSize = avatarSize ?? "32x32";
-        var shouldSkipAvatars = skipAvatars ?? false;
+        // IMPORTANT: Skip avatars by default to prevent 504 timeout!
+        // Avatar enrichment takes too long for large datasets (100+ vibes with recipients + replies)
+        // Frontend should fetch avatars on-demand or use a separate avatar-enriched endpoint with pagination
+        var shouldSkipAvatars = skipAvatars ?? true;
 
         // Check if cache is ready
         if (!cacheService.IsReady)
