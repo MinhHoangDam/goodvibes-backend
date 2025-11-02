@@ -159,7 +159,8 @@ If the first request is slow (>5 seconds), your app is cold starting.
 ## Current Status
 
 ✅ Health endpoint available at: `/health`
-⏳ Needs: Choose and implement one of the strategies above
+✅ "Always On" enabled
+⏳ Next: Enable Azure Health Check (in progress)
 
 ---
 
