@@ -841,10 +841,10 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
     {
         // Default to 32x32 for small screens, allow override for large displays
         var requestedAvatarSize = avatarSize ?? "32x32";
-        // IMPORTANT: Skip avatars by default to prevent 504 timeout!
-        // Avatar enrichment takes too long for large datasets (100+ vibes with recipients + replies)
-        // Frontend should fetch avatars on-demand or use a separate avatar-enriched endpoint with pagination
-        var shouldSkipAvatars = skipAvatars ?? true;
+        // Avatars are now enriched in the cache during background refresh
+        // This makes them instantly available without timeout issues
+        // The skipAvatars parameter is kept for backward compatibility but defaults to false
+        var shouldSkipAvatars = skipAvatars ?? false;
 
         // Check if cache is ready
         if (!cacheService.IsReady)
@@ -1479,13 +1479,17 @@ public class GoodVibesCacheService : BackgroundService
                 }
             }
 
+            // Now enrich with avatars in the background (this will be cached)
+            _logger.LogInformation("Enriching vibes with avatar URLs (this happens in background, once per cache refresh)...");
+            var vibesWithAvatars = await EnrichVibesWithAvatarsAsync(vibesWithRepliesEnriched, httpClient, apiKey);
+
             await _semaphore.WaitAsync();
             try
             {
-                _cachedVibes = vibesWithRepliesEnriched;
+                _cachedVibes = vibesWithAvatars;
                 _isReady = true;
-                _logger.LogInformation("Cached {Count} good vibes from {PageCount} pages ({RepliesCount} with replies) - cache is ready",
-                    vibesWithRepliesEnriched.Count, pageCount, vibesWithReplies);
+                _logger.LogInformation("Cached {Count} good vibes from {PageCount} pages ({RepliesCount} with replies) - cache is ready with avatars",
+                    vibesWithAvatars.Count, pageCount, vibesWithReplies);
             }
             finally
             {
@@ -1508,6 +1512,154 @@ public class GoodVibesCacheService : BackgroundService
         finally
         {
             _semaphore.Release();
+        }
+    }
+
+    private async Task<List<JsonElement>> EnrichVibesWithAvatarsAsync(List<JsonElement> vibes, HttpClient httpClient, string apiKey)
+    {
+        var enrichedVibes = new List<JsonElement>();
+        var userAvatarCache = new Dictionary<string, string>();
+        var semaphore = new SemaphoreSlim(10, 10); // Limit to 10 concurrent requests
+
+        _logger.LogInformation("Starting avatar enrichment for {Count} vibes...", vibes.Count);
+
+        foreach (var vibe in vibes)
+        {
+            var vibeDict = new Dictionary<string, object>();
+
+            // Copy all existing properties
+            foreach (var prop in vibe.EnumerateObject())
+            {
+                vibeDict[prop.Name] = JsonSerializer.Deserialize<object>(prop.Value.GetRawText())!;
+            }
+
+            // Enrich sender user with avatar
+            if (vibe.TryGetProperty("senderUser", out var senderUser) &&
+                senderUser.TryGetProperty("userId", out var senderUserId))
+            {
+                var userId = senderUserId.GetString()!;
+                var avatarUrl = await GetCachedUserAvatarAsync(userId, userAvatarCache, httpClient, apiKey, semaphore);
+
+                var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
+                senderDict["avatarUrl"] = avatarUrl ?? "";
+                vibeDict["senderUser"] = senderDict;
+            }
+
+            // Enrich recipients with avatars
+            if (vibe.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
+            {
+                var enrichedRecipients = new List<Dictionary<string, object>>();
+                foreach (var recipient in recipients.EnumerateArray())
+                {
+                    if (recipient.TryGetProperty("userId", out var recipientUserId))
+                    {
+                        var userId = recipientUserId.GetString()!;
+                        var avatarUrl = await GetCachedUserAvatarAsync(userId, userAvatarCache, httpClient, apiKey, semaphore);
+
+                        var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
+                        recipientDict["avatarUrl"] = avatarUrl ?? "";
+                        enrichedRecipients.Add(recipientDict);
+                    }
+                }
+                vibeDict["recipients"] = enrichedRecipients;
+            }
+
+            // Enrich reply authors with avatars
+            if (vibe.TryGetProperty("replies", out var replies) && replies.ValueKind == JsonValueKind.Array)
+            {
+                var enrichedReplies = new List<Dictionary<string, object>>();
+                foreach (var reply in replies.EnumerateArray())
+                {
+                    var replyDict = JsonSerializer.Deserialize<Dictionary<string, object>>(reply.GetRawText())!;
+
+                    if (reply.TryGetProperty("authorUser", out var authorUser) &&
+                        authorUser.TryGetProperty("userId", out var authorUserId))
+                    {
+                        var userId = authorUserId.GetString()!;
+                        var avatarUrl = await GetCachedUserAvatarAsync(userId, userAvatarCache, httpClient, apiKey, semaphore);
+
+                        var authorDict = JsonSerializer.Deserialize<Dictionary<string, object>>(authorUser.GetRawText())!;
+                        authorDict["avatarUrl"] = avatarUrl ?? "";
+                        replyDict["authorUser"] = authorDict;
+                    }
+
+                    enrichedReplies.Add(replyDict);
+                }
+                vibeDict["replies"] = enrichedReplies;
+            }
+
+            // Convert back to JsonElement
+            var json = JsonSerializer.Serialize(vibeDict);
+            var doc = JsonDocument.Parse(json);
+            enrichedVibes.Add(doc.RootElement.Clone());
+        }
+
+        _logger.LogInformation("Avatar enrichment complete. Fetched {Count} unique user avatars", userAvatarCache.Count);
+        return enrichedVibes;
+    }
+
+    private async Task<string?> GetCachedUserAvatarAsync(string userId, Dictionary<string, string> cache, HttpClient httpClient, string apiKey, SemaphoreSlim semaphore)
+    {
+        // Check cache first
+        if (cache.TryGetValue(userId, out var cachedAvatar))
+        {
+            return cachedAvatar;
+        }
+
+        await semaphore.WaitAsync();
+        try
+        {
+            // Double-check after acquiring semaphore
+            if (cache.TryGetValue(userId, out cachedAvatar))
+            {
+                return cachedAvatar;
+            }
+
+            // Fetch from API
+            var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.workleap.com/public/users/{userId}");
+            request.Headers.Add("workleap-subscription-key", apiKey);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            var response = await httpClient.SendAsync(request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                var userDoc = JsonDocument.Parse(content);
+
+                // Try to get image URL from the extension schema
+                if (userDoc.RootElement.TryGetProperty("urn:workleap:params:scim:schemas:extension:user:2.0:User", out var extension))
+                {
+                    if (extension.TryGetProperty("imageUrls", out var imageUrls))
+                    {
+                        // Try 32x32 first (most common size), then fallback
+                        var sizeFallbacks = new[] { "32x32", "48x48", "64x64", "24x24", "128x128", "256x256" };
+                        foreach (var size in sizeFallbacks)
+                        {
+                            if (imageUrls.TryGetProperty(size, out var sizeImg))
+                            {
+                                var avatarUrl = sizeImg.GetString();
+                                cache[userId] = avatarUrl!;
+                                return avatarUrl;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Cache null/empty result to prevent repeated failed attempts
+            cache[userId] = "";
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch avatar for user {UserId}", userId);
+            cache[userId] = "";
+            return null;
+        }
+        finally
+        {
+            semaphore.Release();
         }
     }
 }
