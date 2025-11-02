@@ -948,6 +948,34 @@ app.MapGet("/api/good-vibes/cached", async (GoodVibesCacheService cacheService, 
                     dict["recipients"] = enrichedRecipients;
                 }
 
+                // Enrich reply authors with avatars
+                if (item.TryGetProperty("replies", out var replies) && replies.ValueKind == JsonValueKind.Array)
+                {
+                    var enrichedReplies = new List<Dictionary<string, object>>();
+                    foreach (var reply in replies.EnumerateArray())
+                    {
+                        var replyDict = JsonSerializer.Deserialize<Dictionary<string, object>>(reply.GetRawText())!;
+
+                        // Enrich the authorUser within each reply
+                        if (reply.TryGetProperty("authorUser", out var authorUser))
+                        {
+                            if (authorUser.TryGetProperty("userId", out var authorUserId))
+                            {
+                                var authorDict = JsonSerializer.Deserialize<Dictionary<string, object>>(authorUser.GetRawText())!;
+                                var userId = authorUserId.GetString()!;
+                                var avatarUrl = await userCache.GetUserAvatarAsync(userId, requestedAvatarSize);
+
+                                // Always add avatarUrl property (empty string if fetch failed)
+                                authorDict["avatarUrl"] = (object?)avatarUrl ?? "";
+                                replyDict["authorUser"] = authorDict;
+                            }
+                        }
+
+                        enrichedReplies.Add(replyDict);
+                    }
+                    dict["replies"] = enrichedReplies;
+                }
+
                 enrichedData.Add(dict);
             }
         }
