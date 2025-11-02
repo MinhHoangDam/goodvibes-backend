@@ -1525,77 +1525,105 @@ public class GoodVibesCacheService : BackgroundService
 
         foreach (var vibe in vibes)
         {
-            var vibeDict = new Dictionary<string, object>();
+            using var stream = new MemoryStream();
+            using var writer = new Utf8JsonWriter(stream);
 
-            // Copy all existing properties
+            writer.WriteStartObject();
+
+            // Copy all existing properties and enrich specific user objects
             foreach (var prop in vibe.EnumerateObject())
             {
-                vibeDict[prop.Name] = JsonSerializer.Deserialize<object>(prop.Value.GetRawText())!;
-            }
-
-            // Enrich sender user with avatar
-            if (vibe.TryGetProperty("senderUser", out var senderUser) &&
-                senderUser.TryGetProperty("userId", out var senderUserId))
-            {
-                var userId = senderUserId.GetString()!;
-                var avatarUrl = await GetCachedUserAvatarAsync(userId, userAvatarCache, httpClient, apiKey, semaphore);
-
-                var senderDict = JsonSerializer.Deserialize<Dictionary<string, object>>(senderUser.GetRawText())!;
-                senderDict["avatarUrl"] = avatarUrl ?? "";
-                vibeDict["senderUser"] = senderDict;
-            }
-
-            // Enrich recipients with avatars
-            if (vibe.TryGetProperty("recipients", out var recipients) && recipients.ValueKind == JsonValueKind.Array)
-            {
-                var enrichedRecipients = new List<Dictionary<string, object>>();
-                foreach (var recipient in recipients.EnumerateArray())
+                if (prop.Name == "senderUser" && prop.Value.ValueKind == JsonValueKind.Object)
                 {
-                    if (recipient.TryGetProperty("userId", out var recipientUserId))
-                    {
-                        var userId = recipientUserId.GetString()!;
-                        var avatarUrl = await GetCachedUserAvatarAsync(userId, userAvatarCache, httpClient, apiKey, semaphore);
-
-                        var recipientDict = JsonSerializer.Deserialize<Dictionary<string, object>>(recipient.GetRawText())!;
-                        recipientDict["avatarUrl"] = avatarUrl ?? "";
-                        enrichedRecipients.Add(recipientDict);
-                    }
+                    // Enrich sender user with avatar
+                    writer.WritePropertyName("senderUser");
+                    await WriteEnrichedUserAsync(writer, prop.Value, userAvatarCache, httpClient, apiKey, semaphore);
                 }
-                vibeDict["recipients"] = enrichedRecipients;
-            }
-
-            // Enrich reply authors with avatars
-            if (vibe.TryGetProperty("replies", out var replies) && replies.ValueKind == JsonValueKind.Array)
-            {
-                var enrichedReplies = new List<Dictionary<string, object>>();
-                foreach (var reply in replies.EnumerateArray())
+                else if (prop.Name == "recipients" && prop.Value.ValueKind == JsonValueKind.Array)
                 {
-                    var replyDict = JsonSerializer.Deserialize<Dictionary<string, object>>(reply.GetRawText())!;
-
-                    if (reply.TryGetProperty("authorUser", out var authorUser) &&
-                        authorUser.TryGetProperty("userId", out var authorUserId))
+                    // Enrich recipients with avatars
+                    writer.WritePropertyName("recipients");
+                    writer.WriteStartArray();
+                    foreach (var recipient in prop.Value.EnumerateArray())
                     {
-                        var userId = authorUserId.GetString()!;
-                        var avatarUrl = await GetCachedUserAvatarAsync(userId, userAvatarCache, httpClient, apiKey, semaphore);
-
-                        var authorDict = JsonSerializer.Deserialize<Dictionary<string, object>>(authorUser.GetRawText())!;
-                        authorDict["avatarUrl"] = avatarUrl ?? "";
-                        replyDict["authorUser"] = authorDict;
+                        await WriteEnrichedUserAsync(writer, recipient, userAvatarCache, httpClient, apiKey, semaphore);
                     }
-
-                    enrichedReplies.Add(replyDict);
+                    writer.WriteEndArray();
                 }
-                vibeDict["replies"] = enrichedReplies;
+                else if (prop.Name == "replies" && prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    // Enrich reply authors with avatars
+                    writer.WritePropertyName("replies");
+                    writer.WriteStartArray();
+                    foreach (var reply in prop.Value.EnumerateArray())
+                    {
+                        writer.WriteStartObject();
+                        foreach (var replyProp in reply.EnumerateObject())
+                        {
+                            if (replyProp.Name == "authorUser" && replyProp.Value.ValueKind == JsonValueKind.Object)
+                            {
+                                writer.WritePropertyName("authorUser");
+                                await WriteEnrichedUserAsync(writer, replyProp.Value, userAvatarCache, httpClient, apiKey, semaphore);
+                            }
+                            else
+                            {
+                                writer.WritePropertyName(replyProp.Name);
+                                replyProp.Value.WriteTo(writer);
+                            }
+                        }
+                        writer.WriteEndObject();
+                    }
+                    writer.WriteEndArray();
+                }
+                else
+                {
+                    // Copy property as-is
+                    writer.WritePropertyName(prop.Name);
+                    prop.Value.WriteTo(writer);
+                }
             }
 
-            // Convert back to JsonElement
-            var json = JsonSerializer.Serialize(vibeDict);
-            var doc = JsonDocument.Parse(json);
+            writer.WriteEndObject();
+            writer.Flush();
+
+            stream.Position = 0;
+            var doc = JsonDocument.Parse(stream);
             enrichedVibes.Add(doc.RootElement.Clone());
         }
 
         _logger.LogInformation("Avatar enrichment complete. Fetched {Count} unique user avatars", userAvatarCache.Count);
         return enrichedVibes;
+    }
+
+    private async Task WriteEnrichedUserAsync(Utf8JsonWriter writer, JsonElement userElement, Dictionary<string, string> cache, HttpClient httpClient, string apiKey, SemaphoreSlim semaphore)
+    {
+        writer.WriteStartObject();
+
+        string? userId = null;
+        if (userElement.TryGetProperty("userId", out var userIdElement))
+        {
+            userId = userIdElement.GetString();
+        }
+
+        // Copy all existing user properties
+        foreach (var prop in userElement.EnumerateObject())
+        {
+            writer.WritePropertyName(prop.Name);
+            prop.Value.WriteTo(writer);
+        }
+
+        // Add or update avatarUrl
+        if (userId != null)
+        {
+            var avatarUrl = await GetCachedUserAvatarAsync(userId, cache, httpClient, apiKey, semaphore);
+            writer.WriteString("avatarUrl", avatarUrl ?? "");
+        }
+        else
+        {
+            writer.WriteString("avatarUrl", "");
+        }
+
+        writer.WriteEndObject();
     }
 
     private async Task<string?> GetCachedUserAvatarAsync(string userId, Dictionary<string, string> cache, HttpClient httpClient, string apiKey, SemaphoreSlim semaphore)
