@@ -1397,6 +1397,13 @@ public class GoodVibesCacheService : BackgroundService
 
                 var response = await httpClient.SendAsync(request);
 
+                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    _logger.LogWarning("Rate limited during pagination, waiting before retry...");
+                    await Task.Delay(TimeSpan.FromSeconds(3));
+                    response = await httpClient.SendAsync(request);
+                }
+
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogError($"Failed to fetch good vibes: {response.StatusCode}");
@@ -1427,12 +1434,19 @@ public class GoodVibesCacheService : BackgroundService
                     }
                 }
 
+                // Add small delay between pagination requests
+                if (!string.IsNullOrEmpty(continuationToken))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(100));
+                }
+
             } while (!string.IsNullOrEmpty(continuationToken));
 
             // Fetch replies for Good Vibes that have replies
             _logger.LogInformation("Fetching replies for Good Vibes with replyCount > 0...");
             var vibesWithReplies = 0;
             var vibesWithRepliesEnriched = new List<JsonElement>();
+            var delayBetweenRequests = TimeSpan.FromMilliseconds(100); // 100ms delay between requests to avoid rate limiting
 
             foreach (var vibe in allVibes)
             {
@@ -1452,15 +1466,28 @@ public class GoodVibesCacheService : BackgroundService
 
                         var vibeResponse = await httpClient.SendAsync(vibeRequest);
 
+                        if (vibeResponse.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                        {
+                            _logger.LogWarning("Rate limited while fetching Good Vibe {GoodVibeId}, waiting before retry...", goodVibeId);
+                            await Task.Delay(TimeSpan.FromSeconds(2));
+
+                            // Retry once
+                            vibeResponse = await httpClient.SendAsync(vibeRequest);
+                        }
+
                         if (vibeResponse.IsSuccessStatusCode)
                         {
                             var vibeContent = await vibeResponse.Content.ReadAsStringAsync();
                             using var vibeDoc = JsonDocument.Parse(vibeContent);
                             vibesWithRepliesEnriched.Add(vibeDoc.RootElement.Clone());
                             vibesWithReplies++;
+
+                            // Add delay between requests to avoid rate limiting
+                            await Task.Delay(delayBetweenRequests);
                         }
                         else
                         {
+                            _logger.LogWarning("Failed to fetch Good Vibe {GoodVibeId}: HTTP {StatusCode}", goodVibeId, vibeResponse.StatusCode);
                             // If fetch fails, keep the original vibe without replies
                             vibesWithRepliesEnriched.Add(vibe);
                         }
