@@ -234,4 +234,20 @@ __pycache__/
 *.pyc
 
 # macOS
-.DS_Storepackage-lock.json
+.DS_Store
+
+# API Keys - IMPORTANT: Never commit real API keys!
+# appsettings.json - Comment this out if you want to track config changes
+!appsettings.example.json
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# VS Code
+.vscode/
+
+# Logs
+logs/
+*.log
